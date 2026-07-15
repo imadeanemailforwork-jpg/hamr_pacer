@@ -292,23 +292,38 @@ async function start() {
 
   await requestWakeLock();
 
+  // Clean restart handshake: clear any prior run on the ESP32 first so the new
+  // GO starts from a known-idle state (prevents the second-run stutter where a
+  // stale run clock and fresh ticks fought each other). Reset audio position and
+  // let it settle to zero before we start streaming ticks.
+  await send("X");
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+    await new Promise((r) => setTimeout(r, 60));   // let currentTime settle to 0
+  } catch (e) { /* non-fatal */ }
+
   // Tell the ESP32 GO is AUDIO_START_MS in the future so the comet waits at the
   // line during the spoken intro. A dropped first write is recovered by the
   // firmware's self-start guard on the first T tick (arg < 2000).
   await send("G,-" + AUDIO_START_MS);
 
   try {
-    audio.currentTime = 0;
     await audio.play();
   } catch (e) {
     setStatus("Audio play blocked: " + (e.message || e), "err");
   }
 
-  // Stream sync ticks (~15/sec). Negative during the intro; firmware parks
-  // the comet until the scheduled time reaches zero.
+  // Stream sync ticks (~15/sec). Only send when the audio clock has actually
+  // advanced past the last value sent: right after play() (especially on a
+  // restart) currentTime can briefly repeat or read low, and sending those
+  // out-of-order values is what made the comet stutter on the second run.
+  let lastSentMs = -1;
   tickTimer = setInterval(() => {
     if (!running) return;
     const posMs = Math.round(audio.currentTime * 1000);
+    if (posMs <= lastSentMs) return;   // skip stale / non-advancing samples
+    lastSentMs = posMs;
     send("T," + posMs);
   }, 66);
 
