@@ -38,6 +38,14 @@
                  margin-bottom:10px; }
   input[type=range] { width:100%; accent-color:var(--accent); }
   .hidden { display:none !important; }
+  .notice { width:100%; max-width:360px; background:#2a1e12;
+    border:1px solid #6b4a1f; border-radius:14px; padding:18px 18px 16px;
+    text-align:left; margin-top:4px; }
+  .notice h2 { margin:0 0 10px; font-size:16px; color:#ffcf8b; letter-spacing:.5px; }
+  .notice p { margin:0 0 12px; font-size:14px; line-height:1.55; color:#e8dcc8; }
+  .notice ol { margin:0; padding-left:20px; font-size:14px; line-height:1.7; color:#e8dcc8; }
+  .notice b { color:#fff; }
+  .notice .sub { color:#b79a76; font-size:12px; margin-top:12px; margin-bottom:0; }
   details.cal { width:100%; max-width:360px; margin-top:14px; }
   details.cal summary { cursor:pointer; list-style:none; color:var(--muted);
     font-size:12px; letter-spacing:1px; text-transform:uppercase;
@@ -71,6 +79,8 @@
   <button class="btn-connect" id="btnConnect">Connect Pacer</button>
   <button class="btn-start hidden" id="btnStart" disabled>Start Test</button>
   <button class="btn-stop  hidden" id="btnStop">Stop Test</button>
+
+  <div class="notice hidden" id="notice"></div>
 
   <div class="panel hidden" id="panel">
     <label>Brightness <span id="brightVal">200</span></label>
@@ -201,7 +211,7 @@ function setReadout(lv, sh) { $("readout").textContent = lv + "-" + sh; }
 // ======================================================================
 async function connect() {
   if (!navigator.bluetooth) {
-    setStatus("Web Bluetooth not supported. Use Chrome or Edge on Android.", "err");
+    checkPlatform();   // show the tailored iPhone / unsupported-browser notice
     return;
   }
   try {
@@ -411,6 +421,64 @@ audio.addEventListener("canplaythrough", () => {
 audio.addEventListener("error", () => {
   setStatus("Could not load hamr.mp3 - is it next to this page?", "err");
 });
+
+// ======================================================================
+//  PLATFORM / WEB-BLUETOOTH SUPPORT CHECK
+//  iOS Safari (and every browser on iPhone/iPad) has no Web Bluetooth, so the
+//  page can't reach the pacer there. Detect that case and point the user to a
+//  Web-BLE-capable browser instead of showing a dead Connect button. If the page
+//  is already open in such a browser (e.g. Bluefy on iOS, or Chrome/Edge on
+//  Android/desktop), navigator.bluetooth exists and we proceed normally.
+// ======================================================================
+function hasWebBluetooth() {
+  return typeof navigator !== "undefined" && !!navigator.bluetooth;
+}
+
+function isIOS() {
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  // iPadOS 13+ presents as "Macintosh"; a touch-capable Mac is really an iPad.
+  if (navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1) return true;
+  return false;
+}
+
+function showNotice(title, html) {
+  $("btnConnect").classList.add("hidden");
+  const n = $("notice");
+  n.innerHTML = "<h2>" + title + "</h2>" + html;
+  n.classList.remove("hidden");
+}
+
+function checkPlatform() {
+  if (hasWebBluetooth()) return true;   // good to go
+  if (isIOS()) {
+    setStatus("iPhone / iPad needs a Web-Bluetooth browser", "err");
+    showNotice("iPhone needs the Bluefy browser",
+      "<p>Safari and Chrome on iPhone/iPad can't use Bluetooth, so this page " +
+      "can't reach the pacer here.</p>" +
+      "<ol>" +
+      "<li>Install <b>Bluefy \u2013 Web BLE Browser</b> from the App Store " +
+      "(search \u201CBluefy\u201D).</li>" +
+      "<li>Open Bluefy and go to this same page address.</li>" +
+      "<li>Tap <b>Connect Pacer</b> \u2013 it works normally from there.</li>" +
+      "</ol>" +
+      "<p class='sub'>Tip: in Bluefy, use the share/menu to keep this page " +
+      "handy for next time.</p>");
+  } else {
+    setStatus("This browser has no Web Bluetooth", "err");
+    showNotice("Browser not supported",
+      "<p>The pacer controller needs <b>Web Bluetooth</b>.</p>" +
+      "<ol>" +
+      "<li>On <b>Android</b> or <b>desktop</b>: open this page in " +
+      "<b>Chrome</b> or <b>Edge</b>.</li>" +
+      "<li>On <b>iPhone / iPad</b>: use the <b>Bluefy</b> browser " +
+      "(from the App Store).</li>" +
+      "</ol>");
+  }
+  return false;
+}
+
+checkPlatform();
 </script>
 </body>
 </html>
