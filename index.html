@@ -67,13 +67,25 @@
   .cal-reset { background:transparent !important; border:1px solid var(--line) !important;
     color:var(--muted) !important; font-size:12px !important; padding:10px 0 !important;
     margin-top:8px !important; }
-  .foot { color:var(--line); font-size:11px; margin-top:26px; letter-spacing:1px; }
+  .total { color:var(--muted); font-size:13px; letter-spacing:1px;
+           text-transform:uppercase; margin:-14px 0 22px; }
+  .total b { color:var(--fg); font-size:19px; font-variant-numeric:tabular-nums;
+             margin-left:8px; font-weight:800; }
+  .rangenote { width:100%; max-width:360px; margin-top:18px; padding:12px 14px;
+               background:#161c2e; border:1px solid var(--line);
+               border-left:3px solid var(--accent); border-radius:10px;
+               color:var(--muted); font-size:12px; line-height:1.5;
+               text-align:left; }
+  .foot { color:var(--muted); font-size:11px; margin-top:18px; line-height:1.7;
+          opacity:.75; }
+  .foot b { color:var(--fg); }
 </style>
 </head>
 <body>
   <h1>HAMR Pacer</h1>
-  <div class="readout" id="readout">1-0</div>
+  <div class="readout" id="readout">1-1</div>
   <div class="labels"><span>Level</span><span>Shuttle</span></div>
+  <div class="total">Shuttles completed <b id="totalVal">0</b></div>
   <div class="status" id="status">Tap Connect to pair with the pacer</div>
 
   <button class="btn-connect" id="btnConnect">Connect Pacer</button>
@@ -108,7 +120,16 @@
     </div>
   </details>
 
-  <div class="foot">Android Chrome / Edge • BLE + Web Audio</div>
+  <div class="rangenote" id="rangeNote">
+    Keep this phone near the pacer during a test — walking too far risks
+    Bluetooth signal loss.
+  </div>
+
+  <div class="foot">
+    Android: Chrome or Edge<br>
+    Apple (iPhone / iPad): use the <b>Bluefy</b> app, or any browser app with
+    Bluetooth (BLE) access
+  </div>
 
   <!-- Place hamr.mp3 next to this file -->
   <audio id="audio" src="hamr.mp3" preload="auto"></audio>
@@ -204,7 +225,10 @@ function setStatus(msg, cls) {
   el.className = "status" + (cls ? " " + cls : "");
 }
 
-function setReadout(lv, sh) { $("readout").textContent = lv + "-" + sh; }
+function setReadout(lv, sh, done) {
+  $("readout").textContent = lv + "-" + sh;
+  if (done !== undefined) $("totalVal").textContent = done;
+}
 
 // ======================================================================
 //  BLE
@@ -270,17 +294,22 @@ async function send(str) {
 
 // ======================================================================
 //  DISPLAY (driven by audio playback position - the master clock)
+//  Convention: the readout shows the shuttle CURRENTLY BEING RUN, not the last
+//  one finished. So during the very first shuttle it reads 1-1, and it ticks to
+//  1-2 at the first beep. The TOTAL below it counts shuttles actually COMPLETED
+//  (i.e. beeps elapsed), which is the figure used for scoring.
 // ======================================================================
 function updateDisplay() {
   const schedMs = Math.round(audio.currentTime * 1000) - AUDIO_START_MS;
-  if (schedMs < 0) { setReadout(1, 0); return; }
+  if (schedMs < 0) { setReadout(1, 1, 0); return; }   // staged for shuttle 1
   const schedS = schedMs / 1000;
-  let idx = 0;
+  let done = 0;                                        // beeps elapsed = completed
   for (let i = 0; i < BEEP_TIMES.length; i++) {
-    if (BEEP_TIMES[i] <= schedS) idx = i + 1; else break;
+    if (BEEP_TIMES[i] <= schedS) done = i + 1; else break;
   }
-  const { lv, sh } = levelShuttle(idx);
-  setReadout(lv, sh);
+  const current = Math.min(done + 1, BEEP_TIMES.length); // shuttle in progress
+  const { lv, sh } = levelShuttle(current);
+  setReadout(lv, sh, done);
 }
 
 function renderLoop() {
@@ -295,7 +324,7 @@ function renderLoop() {
 async function start() {
   if (!connected) return;
   running = true;
-  setReadout(1, 0);
+  setReadout(1, 1, 0);
   $("btnStart").classList.add("hidden");
   $("btnStop").classList.remove("hidden");
   setStatus("Running", "ok");
