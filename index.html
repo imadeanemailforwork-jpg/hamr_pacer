@@ -187,6 +187,47 @@ const SVC = "5f3a7b00-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
 const RX  = "5f3a7b01-1c2d-4e5f-8a9b-0c1d2e3f4a5b"; // phone -> ESP32 (write)
 const TX  = "5f3a7b02-1c2d-4e5f-8a9b-0c1d2e3f4a5b"; // ESP32 -> phone (notify)
 
+// ======================================================================
+//  SPEAKER KEEP-ALIVE
+//  The HAMR track is mostly silence (long intro, multi-second gaps between
+//  beeps). Many Bluetooth speakers mute their amplifier during silence and
+//  take 100-300 ms to wake, which clips/fades the start of each beep. A
+//  continuous, near-inaudible low tone keeps the speaker awake for the whole
+//  run so every beep starts cleanly.
+//  Tuning: if a speaker still drops out, raise KA_GAIN toward 0.01-0.02.
+//  For tiny speakers that can't reproduce lows, raise KA_FREQ to ~220.
+// ======================================================================
+const KA_FREQ = 120;     // Hz
+const KA_GAIN = 0.006;   // ~ -44 dB; inaudible under normal room/gym noise
+let kaCtx = null, kaNodes = null;
+
+function startKeepAlive() {
+  try {
+    if (!kaCtx) kaCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (kaCtx.state === "suspended") kaCtx.resume();
+    if (kaNodes) return;
+    const osc = kaCtx.createOscillator();
+    const gain = kaCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = KA_FREQ;
+    gain.gain.value = KA_GAIN;
+    osc.connect(gain);
+    gain.connect(kaCtx.destination);
+    osc.start();
+    kaNodes = { osc, gain };
+  } catch (e) { /* non-fatal: run continues without keep-alive */ }
+}
+
+function stopKeepAlive() {
+  if (!kaNodes) return;
+  try {
+    kaNodes.osc.stop();
+    kaNodes.osc.disconnect();
+    kaNodes.gain.disconnect();
+  } catch (e) { /* ignore */ }
+  kaNodes = null;
+}
+
 // overall shuttle (0..245) -> {level, shuttle}
 function levelShuttle(overall) {
   let rem = overall;
@@ -323,6 +364,12 @@ function renderLoop() {
 // ======================================================================
 async function start() {
   if (!connected) return;
+
+  // Must run synchronously inside the tap (before any await) so the browser
+  // allows audio output - required on iOS/Bluefy. Wakes the BT speaker now,
+  // so the intro and first beep aren't clipped.
+  startKeepAlive();
+
   running = true;
   setReadout(1, 1, 0);
   $("btnStart").classList.add("hidden");
@@ -374,6 +421,7 @@ function stopLocal() {
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   audio.pause();
+  stopKeepAlive();
   releaseWakeLock();
   $("btnStop").classList.add("hidden");
   if (connected) $("btnStart").classList.remove("hidden");
@@ -401,7 +449,11 @@ function releaseWakeLock() {
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 document.addEventListener("visibilitychange", () => {
-  if (wakeLock === null && running && document.visibilityState === "visible") requestWakeLock();
+  if (document.visibilityState !== "visible" || !running) return;
+  if (wakeLock === null) requestWakeLock();
+  // The OS may suspend the audio context when the screen blinks/locks;
+  // resume it so the keep-alive tone continues.
+  if (kaCtx && kaCtx.state === "suspended") kaCtx.resume().catch(() => {});
 });
 
 // ======================================================================
