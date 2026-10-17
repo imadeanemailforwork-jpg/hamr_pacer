@@ -9,11 +9,38 @@
   :root { --bg:#0b1020; --card:#161c2e; --fg:#e8ecf6; --muted:#8b93a7;
           --accent:#3d7bff; --go:#1f9d55; --stop:#d63b3b; --line:#26304a; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html,body { margin:0; height:100%; }
+  /* overscroll-behavior:none disables pull-to-refresh in Chrome/Edge (Android)
+     and the rubber-band bounce on newer iOS. */
+  html,body { margin:0; min-height:100%; overscroll-behavior-y:none; }
   body { background:var(--bg); color:var(--fg); font-family:-apple-system,
          Segoe UI, Roboto, system-ui, sans-serif; display:flex;
-         flex-direction:column; align-items:center; justify-content:center;
-         padding:20px; text-align:center; }
+         flex-direction:column; align-items:center;
+         padding:0 20px; text-align:center; }
+  /* Extra page length. The page opens scrolled past the top buffer, so a
+     downward swipe scrolls into the buffer instead of refreshing the page. */
+  .buffer-top { width:100%; height:45vh; flex:none; display:flex;
+                align-items:flex-end; justify-content:center;
+                padding-bottom:18px; color:var(--muted); font-size:12px;
+                line-height:1.5; opacity:.8; }
+  .buffer-bottom { width:100%; height:50vh; flex:none; }
+  .app { width:100%; display:flex; flex-direction:column; align-items:center;
+         padding-top:20px; }
+  .warn { width:100%; max-width:360px; background:#2a1e12;
+          border:1px solid #6b4a1f; border-left:4px solid #ffb347;
+          border-radius:12px; padding:14px 16px; text-align:left;
+          margin:0 0 14px; }
+  .warn h2 { margin:0 0 8px; font-size:13px; color:#ffcf8b; letter-spacing:1.5px;
+             text-transform:uppercase; }
+  .warn ol { margin:0; padding-left:18px; font-size:13.5px; line-height:1.5;
+             color:#e8dcc8; }
+  .warn li { margin-bottom:6px; }
+  .warn li:last-child { margin-bottom:0; }
+  .warn b { color:#fff; }
+  .warn-mini { display:none; font-size:12.5px; color:#ffcf8b; font-weight:600;
+               letter-spacing:.3px; }
+  body.running .warn { padding:10px 14px; }
+  body.running .warn-full { display:none; }
+  body.running .warn-mini { display:block; }
   h1 { font-size:15px; letter-spacing:3px; color:var(--muted); margin:0 0 6px;
        text-transform:uppercase; font-weight:600; }
   .readout { font-variant-numeric:tabular-nums; font-weight:800;
@@ -82,11 +109,34 @@
 </style>
 </head>
 <body>
+  <!-- Pull-down buffer: the page opens scrolled past this, so swiping down
+       scrolls here instead of refreshing the page. -->
+  <div class="buffer-top" aria-hidden="true">
+    &#8595; Don't pull down to refresh during a test.<br>Scroll back down.
+  </div>
+
+  <main class="app" id="app">
   <h1>HAMR Pacer</h1>
   <div class="readout" id="readout">1-1</div>
   <div class="labels"><span>Level</span><span>Shuttle</span></div>
   <div class="total">Shuttles completed <b id="totalVal">0</b></div>
   <div class="status" id="status">Tap Connect to pair with the pacer</div>
+
+  <div class="warn" id="warn" role="note">
+    <div class="warn-full">
+      <h2>&#9888; Before you start</h2>
+      <ol>
+        <li>Turn on <b>Do Not Disturb</b> (iPhone: Control Center &rarr;
+            <b>Focus</b> &rarr; Do Not Disturb). Calls, texts, and alarms can
+            interrupt the audio during the test.</li>
+        <li><b>Don't refresh or close this page</b> during a test. That stops
+            the audio and the timing. Don't pull down from the top of the
+            screen.</li>
+        <li>Keep this screen open. Don't switch apps or lock the phone.</li>
+      </ol>
+    </div>
+    <div class="warn-mini">&#9888; Do Not Disturb on &middot; Don't refresh &middot; Keep this screen open</div>
+  </div>
 
   <button class="btn-connect" id="btnConnect">Connect Pacer</button>
   <button class="btn-start hidden" id="btnStart" disabled>Start Test</button>
@@ -121,8 +171,9 @@
   </details>
 
   <div class="rangenote" id="rangeNote">
-    Keep this phone near the pacer during a test — walking too far risks
-    Bluetooth signal loss.
+    Keep this phone near the pacer during a test. If the Bluetooth connection
+    drops, the audio keeps playing and the lights keep running on their own
+    clock. The app reconnects automatically and re-syncs.
   </div>
 
   <div class="foot">
@@ -130,6 +181,9 @@
     Apple (iPhone / iPad): use the <b>Bluefy</b> app, or any browser app with
     Bluetooth (BLE) access
   </div>
+  </main>
+
+  <div class="buffer-bottom" aria-hidden="true"></div>
 
   <!-- Place hamr.mp3 next to this file -->
   <audio id="audio" src="hamr.mp3" preload="auto"></audio>
@@ -248,6 +302,16 @@ let device = null, rxChar = null, txChar = null;
 let connected = false, running = false;
 let tickTimer = null, rafId = null, wakeLock = null;
 
+// Connection-loss handling
+let connecting = false;      // a GATT connect is in flight
+let reconnectTimer = null;   // pending auto-reconnect attempt
+let idleRetries = 0;         // auto-retries used while NOT running (capped)
+let resumePending = false;   // reconnected mid-run; waiting on pacer status
+let pendingStop = false;     // Stop pressed while disconnected; send X on reconnect
+const RECONNECT_MS = 2000;
+const IDLE_RETRY_MAX = 5;
+const dec = new TextDecoder();
+
 // Calibration: how much LATER the light should appear, in ms, to line up with
 // the Bluetooth speaker's audio latency. Positive = light later. Sent to the
 // ESP32 as the 'O' offset, which is NEGATED because a later comet arrival is a
@@ -274,11 +338,27 @@ function setReadout(lv, sh, done) {
 // ======================================================================
 //  BLE
 // ======================================================================
+// Connect / Reconnect button.
 async function connect() {
   if (!navigator.bluetooth) {
     checkPlatform();   // show the tailored iPhone / unsupported-browser notice
     return;
   }
+  clearReconnect();
+
+  // Already paired this session: reconnect directly, no picker needed.
+  if (device) {
+    const ok = await connectGatt();
+    if (!ok) {
+      // Forget it so the next tap opens the picker (the picker must be opened
+      // directly from a tap, so it can't be chained after a failed attempt).
+      device.removeEventListener("gattserverdisconnected", onDisconnected);
+      device = null;
+      setStatus("Couldn't reach the pacer. Tap Reconnect to pick it again.", "err");
+    }
+    return;
+  }
+
   try {
     setStatus("Opening device picker...");
     device = await navigator.bluetooth.requestDevice({
@@ -286,8 +366,21 @@ async function connect() {
       optionalServices: [SVC]
     });
     device.addEventListener("gattserverdisconnected", onDisconnected);
+    const ok = await connectGatt();
+    if (!ok) setStatus("Connect failed. Tap Connect to try again.", "err");
+  } catch (e) {
+    setStatus("Connect failed: " + (e.message || e), "err");
+  }
+}
 
-    setStatus("Connecting...");
+// Opens the GATT link to the known device. Used for first connect, the
+// Reconnect button, and automatic reconnects. Returns true on success.
+async function connectGatt() {
+  if (connecting || !device) return false;
+  connecting = true;
+  try {
+    setStatus(running ? "Reconnecting to pacer... (test continues)" : "Connecting...",
+              running ? "err" : "");
     const server = await device.gatt.connect();
     const svc = await server.getPrimaryService(SVC);
     rxChar = await svc.getCharacteristic(RX);
@@ -299,30 +392,116 @@ async function connect() {
     } catch (e) { /* notifications optional; display is driven by audio */ }
 
     connected = true;
-    setStatus("Connected & ready", "ok");
-    $("btnConnect").classList.add("hidden");
-    $("btnStart").classList.remove("hidden");
-    $("panel").classList.remove("hidden");
-    $("calPanel").classList.remove("hidden");
-    renderCalVal();
-    sendOffset();              // push the saved calibration to the pacer
-    updateStartEnabled();
+    connecting = false;
+    idleRetries = 0;
+    clearReconnect();
+    showConnectedUI();
+
+    // Re-push settings (the pacer may have rebooted).
+    sendOffset();
+    send("B," + $("bright").value);
+
+    if (pendingStop) {           // Stop was pressed while disconnected
+      pendingStop = false;
+      await send("X");
+    }
+
+    if (running) {
+      // Mid-test reconnect: ask the pacer for its state. If it's still running,
+      // the sync ticks re-align it automatically. If it rebooted (idle),
+      // onNotify restarts it at the current audio position.
+      resumePending = true;
+      send("P");
+      setStatus("Pacer reconnected. Test running.", "ok");
+    } else {
+      setStatus("Connected & ready", "ok");
+    }
+    return true;
   } catch (e) {
-    setStatus("Connect failed: " + (e.message || e), "err");
+    connecting = false;
+    return false;
   }
 }
 
-function onDisconnected() {
-  connected = false;
-  stopLocal();
-  setStatus("Pacer disconnected. Tap Connect to reconnect.", "err");
-  $("btnConnect").classList.remove("hidden");
-  $("btnStart").classList.add("hidden");
-  $("btnStop").classList.add("hidden");
-  $("panel").classList.add("hidden");
+function showConnectedUI() {
+  $("btnConnect").classList.add("hidden");
+  $("btnConnect").textContent = "Connect Pacer";
+  if (running) {
+    $("btnStart").classList.add("hidden");
+    $("btnStop").classList.remove("hidden");
+  } else {
+    $("btnStart").classList.remove("hidden");
+    $("btnStop").classList.add("hidden");
+  }
+  $("panel").classList.remove("hidden");
+  $("calPanel").classList.remove("hidden");
+  renderCalVal();
+  updateStartEnabled();
 }
 
-function onNotify() { /* ST,... status - ignored; audio position drives UI */ }
+// Connection lost. During a test, nothing stops: the audio keeps playing,
+// the readout keeps counting, and the pacer free-runs on its own clock.
+// The app tries to reconnect every 2 s in the background.
+function onDisconnected() {
+  connected = false;
+  connecting = false;
+  rxChar = null;
+  txChar = null;
+  resumePending = false;
+
+  $("btnConnect").textContent = "Reconnect Pacer";
+  $("btnConnect").classList.remove("hidden");
+
+  if (running) {
+    // Keep Stop visible; leave audio, keep-alive, ticks, and display running.
+    setStatus("Pacer connection lost. Audio continues and the lights run on " +
+              "their own. Reconnecting...", "err");
+  } else {
+    $("btnStart").classList.add("hidden");
+    $("btnStop").classList.add("hidden");
+    setStatus("Pacer disconnected. Reconnecting...", "err");
+  }
+  updateStartEnabled();
+  idleRetries = 0;
+  scheduleReconnect();
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer || !device || connected) return;
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    if (connected || !device) return;
+    const ok = await connectGatt();
+    if (ok) return;
+    // Retry indefinitely during a test; a few times when idle.
+    if (running || ++idleRetries < IDLE_RETRY_MAX) {
+      if (running) setStatus("Pacer connection lost. Audio continues and the " +
+                             "lights run on their own. Reconnecting...", "err");
+      scheduleReconnect();
+    } else {
+      setStatus("Pacer disconnected. Tap Reconnect Pacer.", "err");
+    }
+  }, RECONNECT_MS);
+}
+
+function clearReconnect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+}
+
+// Status notifications (ST,<state>,<level>,<shuttle>,<global>). Used only to
+// resume after a mid-test reconnect; the audio position drives the UI.
+function onNotify(ev) {
+  if (!resumePending) return;
+  let parts;
+  try { parts = dec.decode(ev.target.value).trim().split(","); } catch (e) { return; }
+  if (parts[0] !== "ST") return;
+  resumePending = false;
+  if (running && parts[1] === "I") {
+    // The pacer lost its run (e.g. power blip). Restart it at the current
+    // audio position; the sync ticks then fine-tune it.
+    send("G," + Math.round(audio.currentTime * 1000));
+  }
+}
 
 async function send(str) {
   if (!connected || !rxChar) return;
@@ -371,6 +550,9 @@ async function start() {
   startKeepAlive();
 
   running = true;
+  pendingStop = false;
+  document.body.classList.add("running");   // collapses the warning card
+  scrollToApp();                            // re-arm the pull-down buffer
   setReadout(1, 1, 0);
   $("btnStart").classList.add("hidden");
   $("btnStop").classList.remove("hidden");
@@ -418,6 +600,8 @@ async function start() {
 
 function stopLocal() {
   running = false;
+  resumePending = false;
+  document.body.classList.remove("running");
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   audio.pause();
@@ -427,14 +611,47 @@ function stopLocal() {
   if (connected) $("btnStart").classList.remove("hidden");
 }
 
+// Tells the pacer to stop now, or as soon as it reconnects.
+function stopPacer() {
+  if (connected) send("X");
+  else pendingStop = true;
+}
+
 async function stop() {
   stopLocal();
-  await send("X");
-  setStatus("Stopped", "");
+  stopPacer();
+  setStatus(connected ? "Stopped"
+                      : "Stopped. The lights stop when the pacer reconnects.",
+            connected ? "" : "err");
 }
 
 audio.addEventListener("ended", () => {
-  if (running) { stopLocal(); send("X"); setStatus("Test complete", "ok"); }
+  if (running) { stopLocal(); stopPacer(); setStatus("Test complete", "ok"); }
+});
+
+// ======================================================================
+//  REFRESH PROTECTION
+//  1) The page opens scrolled past a top buffer, so a downward swipe
+//     scrolls into the buffer instead of triggering pull-to-refresh.
+//  2) CSS overscroll-behavior blocks pull-to-refresh where supported.
+//  3) During a test, the browser asks "Leave site?" before any reload/close.
+// ======================================================================
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
+function scrollToApp() {
+  const y = $("app").getBoundingClientRect().top + window.scrollY;
+  window.scrollTo(0, Math.max(0, y));
+}
+
+window.addEventListener("load", () => {
+  requestAnimationFrame(() => requestAnimationFrame(scrollToApp));
+});
+
+window.addEventListener("beforeunload", (e) => {
+  if (!running) return;
+  e.preventDefault();
+  e.returnValue = "";   // required by some browsers to show the prompt
+  return "";
 });
 
 // ======================================================================
